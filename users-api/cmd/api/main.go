@@ -2,9 +2,10 @@ package main
 
 import (
 	"log"
-	"net/http"
 	"time"
 
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 
 	"users-api/internal/config"
@@ -17,7 +18,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// intenta conectar varias veces a MySQL (útil en Docker cuando MySQL aún no levantó)
 func connectWithRetry(dsn string, attempts int, wait time.Duration) (*gorm.DB, error) {
 	var db *gorm.DB
 	var err error
@@ -33,12 +33,10 @@ func connectWithRetry(dsn string, attempts int, wait time.Duration) (*gorm.DB, e
 }
 
 func main() {
-	// carga .env en dev; en Docker las env vienen del compose
-	_ = godotenv.Load()
-
+	_ = godotenv.Load() // en Docker las env vienen del compose
 	cfg := config.Load()
 
-	// DB con reintentos (30 intentos x 1s ≈ 30s)
+	// DB (retry)
 	db, err := connectWithRetry(cfg.DBDSN, 30, 1*time.Second)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
@@ -52,24 +50,39 @@ func main() {
 	authSvc := services.NewAuthService(userRepo, cfg.JWTSecret, cfg.JWTTTL)
 	authCtl := controllers.NewAuthController(authSvc)
 	usersCtl := controllers.NewUsersController(userRepo)
-
-	// router + middlewares
-	mux := http.NewServeMux()
-	withRecover := middleware.RecoverAndJSONErrors
 	authMW := middleware.NewAuthMiddleware(cfg.JWTSecret)
 
-	// públicos
-	mux.Handle("GET /health", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("ok"))
+	// Gin router
+	r := gin.New()
+	r.Use(gin.Logger())
+	r.Use(middleware.RecoverJSON())
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:3000"}, // poné tu front acá
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
 	}))
-	mux.Handle("POST /auth/login", withRecover(http.HandlerFunc(authCtl.Login)))
-	mux.Handle("POST /users", withRecover(http.HandlerFunc(authCtl.RegisterNormal)))
+
+	// públicos
+	r.GET("/health", func(c *gin.Context) { c.String(200, "ok") })
+	r.POST("/auth/login", authCtl.Login)
+	r.POST("/users", authCtl.RegisterNormal)
 
 	// protegidos
-	mux.Handle("GET /me", withRecover(authMW.RequireAuth(http.HandlerFunc(usersCtl.Me))))
-	mux.Handle("GET /users/{id}", withRecover(authMW.RequireAuth(http.HandlerFunc(usersCtl.GetByID))))
+	secured := r.Group("/", authMW.RequireAuth())
+	{
+		secured.GET("/me", usersCtl.Me)
+		secured.GET("/users/:id", usersCtl.GetByID)
+		// ejemplo admin-only:
+		// admin := secured.Group("/admin", authMW.RequireAdmin())
+		// admin.POST("/users", usersCtl.CreateAdmin)
+	}
 
 	addr := ":" + cfg.HTTPPort
-	log.Printf("users-api up on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	log.Printf("users-api (gin) up on %s", addr)
+	if err := r.Run(addr); err != nil {
+		log.Fatal(err)
+	}
 }
