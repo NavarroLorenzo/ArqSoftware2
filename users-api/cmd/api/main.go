@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -16,13 +17,29 @@ import (
 	"gorm.io/gorm"
 )
 
+// intenta conectar varias veces a MySQL (útil en Docker cuando MySQL aún no levantó)
+func connectWithRetry(dsn string, attempts int, wait time.Duration) (*gorm.DB, error) {
+	var db *gorm.DB
+	var err error
+	for i := 1; i <= attempts; i++ {
+		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
+		if err == nil {
+			return db, nil
+		}
+		log.Printf("db connect failed (try %d/%d): %v", i, attempts, err)
+		time.Sleep(wait)
+	}
+	return nil, err
+}
+
 func main() {
-	_ = godotenv.Load() // opcional: carga .env si existe
+	// carga .env en dev; en Docker las env vienen del compose
+	_ = godotenv.Load()
 
 	cfg := config.Load()
 
-	// DB
-	db, err := gorm.Open(mysql.Open(cfg.DBDSN), &gorm.Config{})
+	// DB con reintentos (30 intentos x 1s ≈ 30s)
+	db, err := connectWithRetry(cfg.DBDSN, 30, 1*time.Second)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
 	}
@@ -43,7 +60,7 @@ func main() {
 
 	// públicos
 	mux.Handle("GET /health", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 	mux.Handle("POST /auth/login", withRecover(http.HandlerFunc(authCtl.Login)))
 	mux.Handle("POST /users", withRecover(http.HandlerFunc(authCtl.RegisterNormal)))

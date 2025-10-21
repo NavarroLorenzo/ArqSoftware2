@@ -1,0 +1,37 @@
+# docker-compose.yml
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: usersdb
+      MYSQL_USER: users
+      MYSQL_PASSWORD: userspass
+    # si 3306 está ocupado en tu PC, cambiá a "3307:3306"
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  users-api:
+    build:
+      context: ./users-api
+    environment:
+      HTTP_PORT: "8080"
+      DB_DSN: "users:userspass@tcp(mysql:3306)/usersdb?parseTime=true"
+      JWT_SECRET: "supersecret"
+      JWT_TTL_MIN: "60"
+      APP_ENV: "docker"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+
+volumes:
+  mysql_data: {}
